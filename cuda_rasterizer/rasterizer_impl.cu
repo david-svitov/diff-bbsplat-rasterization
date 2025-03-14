@@ -75,6 +75,7 @@ __global__ void duplicateWithKeys(
 	uint64_t* gaussian_keys_unsorted,
 	uint32_t* gaussian_values_unsorted,
 	int* radii,
+	float2* rects,
 	dim3 grid)
 {
 	auto idx = cg::this_grid().thread_rank();
@@ -88,7 +89,14 @@ __global__ void duplicateWithKeys(
 		uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
 		uint2 rect_min, rect_max;
 
-		getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid);
+#if FAST_INFERENCE
+		if (radii[idx] > MAX_BILLBOARD_SIZE)
+		    getRectOld(points_xy[idx], radii[idx], rect_min, rect_max, grid);
+		else
+		    getRect(points_xy[idx], rects[idx], rect_min, rect_max, grid);
+#else
+        getRectOld(points_xy[idx], radii[idx], rect_min, rect_max, grid);
+#endif
 
 		// For each tile that the bounding rect overlaps, emit a 
 		// key/value pair. The key is |  tile ID  |      depth      |,
@@ -158,6 +166,7 @@ CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& ch
 	obtain(chunk, geom.depths, P, 128);
 	obtain(chunk, geom.clamped, P * 3, 128);
 	obtain(chunk, geom.internal_radii, P, 128);
+	obtain(chunk, geom.rects2D, P, 128);
 	obtain(chunk, geom.means2D, P, 128);
 	obtain(chunk, geom.transMat, P * 9, 128);
 	obtain(chunk, geom.normal, P, 128);
@@ -265,6 +274,7 @@ int CudaRasterizer::Rasterizer::forward(
 		focal_x, focal_y,
 		tan_fovx, tan_fovy,
 		radii,
+		geomState.rects2D,
 		geomState.means2D,
 		geomState.depths,
 		geomState.transMat,
@@ -286,7 +296,24 @@ int CudaRasterizer::Rasterizer::forward(
 	size_t binning_chunk_size = required<BinningState>(num_rendered);
 	char* binning_chunkptr = binningBuffer(binning_chunk_size);
 	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered);
+	
+	const float* transMat_ptr = transMat_precomp != nullptr ? transMat_precomp : geomState.transMat;
 
+	#if TILE_SORTING
+        FORWARD::duplicate(
+	    P, width, height, focal_x, focal_y, 
+	    geomState.means2D,
+	    geomState.depths,
+	    (float2*)scales,
+	    transMat_ptr,
+	    geomState.point_offsets,
+	    radii,
+	    geomState.rects2D,
+	    binningState.point_list_keys_unsorted,
+	    binningState.point_list_unsorted,
+	    tile_grid
+    );
+    #else
 	// For each instance to be rendered, produce adequate [ tile | depth ] key 
 	// and corresponding dublicated Gaussian indices to be sorted
 	duplicateWithKeys << <(P + 255) / 256, 256 >> > (
@@ -297,7 +324,10 @@ int CudaRasterizer::Rasterizer::forward(
 		binningState.point_list_keys_unsorted,
 		binningState.point_list_unsorted,
 		radii,
+		geomState.rects2D,
 		tile_grid)
+	#endif
+	
 	CHECK_CUDA(, debug)
 
 	int bit = getHigherMsb(tile_grid.x * tile_grid.y);
@@ -322,7 +352,6 @@ int CudaRasterizer::Rasterizer::forward(
 
 	// Let each tile blend its range of Gaussians independently in parallel
 	const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
-	const float* transMat_ptr = transMat_precomp != nullptr ? transMat_precomp : geomState.transMat;
 	CHECK_CUDA(FORWARD::render(
 		tile_grid, block,
 		imgState.ranges,
@@ -368,6 +397,8 @@ void CudaRasterizer::Rasterizer::backward(
 	const float* campos,
 	const float tan_fovx, float tan_fovy,
 	const int* radii,
+	const float* out_color,
+	const float* out_others,
 	char* geom_buffer,
 	char* binning_buffer,
 	char* img_buffer,
@@ -424,6 +455,8 @@ void CudaRasterizer::Rasterizer::backward(
 		depth_ptr,
 		imgState.accum_alpha,
 		imgState.n_contrib,
+		out_color,
+		out_others,
 		dL_dpix,
 		dL_depths,
 		dL_dtransMat,

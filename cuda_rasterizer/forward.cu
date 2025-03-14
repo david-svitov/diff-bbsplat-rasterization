@@ -12,6 +12,8 @@
 #include "forward.h"
 #include "grid_sample.h"
 #include "auxiliary.h"
+#include "stopthepop_2DGS/stopthepop_common.cuh"
+#include "stopthepop_2DGS/resorted_render.cuh"
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
@@ -181,6 +183,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const float tan_fovx, const float tan_fovy,
 	const float focal_x, const float focal_y,
 	int* radii,
+    float2* rects,
 	float2* points_xy_image,
 	float* depths,
 	float* transMats,
@@ -233,9 +236,18 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float radius = ceil(truncated_R * max(max(extent.x, extent.y), FilterSize));
 
 	uint2 rect_min, rect_max;
-	getRect(center, radius, rect_min, rect_max, grid);
-	if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0)
-		return;
+#if FAST_INFERENCE
+	if (radius > MAX_BILLBOARD_SIZE)
+	    getRectOld(center, radius, rect_min, rect_max, grid);
+	else
+	    getRect(center, extent, rect_min, rect_max, grid);
+#else
+    getRectOld(center, radius, rect_min, rect_max, grid);
+#endif
+
+	if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0) {
+    		return;
+	}
 
 	// compute colors 
 	if (colors_precomp == nullptr) {
@@ -246,6 +258,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	}
 
 	depths[idx] = p_view.z;
+    rects[idx] = extent;
 	radii[idx] = (int)radius;
 	points_xy_image[idx] = center;
 	// store them in float4
@@ -299,7 +312,6 @@ renderCUDA(
 
 	// Allocate storage for batches of collectively fetched data.
 	__shared__ int collected_id[BLOCK_SIZE];
-	__shared__ float2 collected_xy[BLOCK_SIZE];
 	__shared__ float3 collected_normal[BLOCK_SIZE];
 	__shared__ float3 collected_Tu[BLOCK_SIZE];
 	__shared__ float3 collected_Tv[BLOCK_SIZE];
@@ -319,7 +331,7 @@ renderCUDA(
 	float dist1 = {0};
 	float dist2 = {0};
 	float distortion = {0};
-	float median_depth = {0};
+	float median_depth = {100};
 	float median_weight = {0};
 	float median_contributor = {-1};
 
@@ -339,7 +351,6 @@ renderCUDA(
 		{
 			int coll_id = point_list[range.x + progress];
 			collected_id[block.thread_rank()] = coll_id;
-			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
 			collected_normal[block.thread_rank()] = normal_array[coll_id];
 			collected_Tu[block.thread_rank()] = {transMats[9 * coll_id+0], transMats[9 * coll_id+1], transMats[9 * coll_id+2]};
 			collected_Tv[block.thread_rank()] = {transMats[9 * coll_id+3], transMats[9 * coll_id+4], transMats[9 * coll_id+5]};
@@ -409,7 +420,7 @@ renderCUDA(
 			float error = mapped_depth * mapped_depth * A + dist2 - 2 * mapped_depth * dist1;
 			distortion += error * alpha * T;
 
-			if (T > 0.5) {
+			if (T > 0.5 && alpha > 0.05) {
 				median_depth = depth;
 				median_weight = alpha * T;
 				median_contributor = contributor;
@@ -484,25 +495,48 @@ void FORWARD::render(
 	float* out_others,
 	float* impact)
 {
-	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
-		ranges,
-		point_list,
-		W, H,
-		focal_x, focal_y,
-		means2D,
-		colors,
-		texture_alpha,
-		texture_color,
-		texture_size,
-		transMats,
-		depths,
-		normal_array,
-		final_T,
-		n_contrib,
-		bg_color,
-		out_color,
-		out_others,
-		impact);
+
+#if PIXEL_RESORTING
+    renderBufferCUDA<NUM_CHANNELS> << <grid, block >> > (
+	    ranges,
+	    point_list,
+	    W, H,
+	    focal_x, focal_y,
+	    means2D,
+	    colors,
+	    texture_alpha,
+	    texture_color,
+	    texture_size,
+	    transMats,
+	    depths,
+	    normal_array,
+	    final_T,
+	    n_contrib,
+	    bg_color,
+	    out_color,
+	    out_others,
+	    impact);
+#else
+    renderCUDA<NUM_CHANNELS> << <grid, block >> > (
+	    ranges,
+	    point_list,
+	    W, H,
+	    focal_x, focal_y,
+	    means2D,
+	    colors,
+	    texture_alpha,
+	    texture_color,
+	    texture_size,
+	    transMats,
+	    depths,
+	    normal_array,
+	    final_T,
+	    n_contrib,
+	    bg_color,
+	    out_color,
+	    out_others,
+	    impact);
+#endif
 }
 
 void FORWARD::preprocess(int P, int D, int M,
@@ -521,6 +555,7 @@ void FORWARD::preprocess(int P, int D, int M,
 	const float focal_x, const float focal_y,
 	const float tan_fovx, const float tan_fovy,
 	int* radii,
+    float2* rects,
 	float2* means2D,
 	float* depths,
 	float* transMats,
@@ -547,6 +582,7 @@ void FORWARD::preprocess(int P, int D, int M,
 		tan_fovx, tan_fovy,
 		focal_x, focal_y,
 		radii,
+		rects,
 		means2D,
 		depths,
 		transMats,
@@ -556,4 +592,35 @@ void FORWARD::preprocess(int P, int D, int M,
 		tiles_touched,
 		prefiltered
 		);
+}
+
+void FORWARD::duplicate(
+	int P,
+	int W, int H,
+	const float focal_x, const float focal_y,
+	const float2* means2D,
+	const float* depths,
+	const float2* scales,
+	const float* view2gaussians,
+	const uint32_t* offsets,
+	const int* radii,
+	const float2* rects,
+	uint64_t* gaussian_keys_unsorted,
+	uint32_t* gaussian_values_unsorted,
+	dim3 grid)
+{
+	duplicateWithKeys_extended<false, true> << <(P + 255) / 256, 256 >> >(
+		P, W, H, focal_x, focal_y,
+		means2D,
+		depths,
+		scales,
+		view2gaussians,
+		offsets,
+		radii,
+		rects,
+		gaussian_keys_unsorted,
+		gaussian_values_unsorted,
+		grid
+	);
+
 }

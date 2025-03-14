@@ -27,6 +27,7 @@
 #define MIDDEPTH_OFFSET 5
 #define DISTORTION_OFFSET 6
 #define MEDIAN_WEIGHT_OFFSET 7
+#define OUTPUT_CHANNELS 8
 
 // distortion helper macros
 #define BACKFACE_CULL 1
@@ -34,6 +35,16 @@
 #define NEAR_PLANE 0.2
 #define FAR_PLANE 100.0
 #define DETACH_WEIGHT 0
+
+#define TILE_SORTING 0
+#define PIXEL_RESORTING 0
+#define BUFFER_LENGTH 8
+
+#define FAST_INFERENCE 0
+#define MAX_BILLBOARD_SIZE 1000
+
+constexpr uint32_t WARP_SIZE = 32U;
+constexpr uint32_t WARP_MASK = 0xFFFFFFFFU;
 
 // Spherical harmonics coefficients
 __device__ const float SH_C0 = 0.28209479177387814f;
@@ -55,12 +66,33 @@ __device__ const float SH_C3[] = {
 	-0.5900435899266435f
 };
 
+template<typename T>
+__device__ void swap_T(T& a, T& b)
+{
+	T temp = a;
+	a = b;
+	b = temp;
+}
+
 __forceinline__ __device__ float ndc2Pix(float v, int S)
 {
 	return ((v + 1.0) * S - 1.0) * 0.5;
 }
 
-__forceinline__ __device__ void getRect(const float2 p, int max_radius, uint2& rect_min, uint2& rect_max, dim3 grid)
+
+__forceinline__ __device__ void getRect(const float2 p, float2 max_radius, uint2& rect_min, uint2& rect_max, dim3 grid)
+{
+	rect_min = {
+		min(grid.x, max((int)0, (int)floorf((p.x - max_radius.x) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)floorf((p.y - max_radius.y) / BLOCK_Y)))
+	};
+	rect_max = {
+		min(grid.x, max((int)0, (int)ceilf((p.x + max_radius.x) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)ceilf((p.y + max_radius.y) / BLOCK_Y)))
+	};
+}
+
+__forceinline__ __device__ void getRectOld(const float2 p, int max_radius, uint2& rect_min, uint2& rect_max, dim3 grid)
 {
 	rect_min = {
 		min(grid.x, max((int)0, (int)((p.x - max_radius) / BLOCK_X))),
@@ -261,7 +293,7 @@ scale_to_mat(const float3 scale, const float glob_scale) {
 	glm::mat3 S = glm::mat3(1.f);
 	S[0][0] = glob_scale * scale.x;
 	S[1][1] = glob_scale * scale.y;
-	S[2][2] = glob_scale * scale.z;
+	//S[2][2] = glob_scale * scale.z;
 	return S;
 }
 

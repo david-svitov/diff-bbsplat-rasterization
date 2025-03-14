@@ -43,6 +43,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	 const torch::Tensor& background,
 	const torch::Tensor& means3D,
 	const torch::Tensor& radii,
+	const torch::Tensor& out_color,
+	const torch::Tensor& out_others,
 	const torch::Tensor& colors,
 	const torch::Tensor& scales,
 	const torch::Tensor& rotations,

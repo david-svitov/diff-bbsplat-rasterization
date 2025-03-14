@@ -37,6 +37,7 @@ namespace FORWARD
 		const float focal_x, float focal_y,
 		const float tan_fovx, float tan_fovy,
 		int* radii,
+		float2* rects,
 		float2* points_xy_image,
 		float* depths,
 		float* transMats,
@@ -67,6 +68,21 @@ namespace FORWARD
 		float* out_color,
 		float* out_others,
 		float* impact);
+		
+    void duplicate(
+		int P,
+		int W, int H,
+		const float focal_x, const float focal_y,
+		const float2 *means2D,
+		const float* depths,
+		const float2* scales,
+		const float* view2gaussians,
+		const uint32_t* offsets,
+		const int* radii,
+		const float2* rects,
+		uint64_t* gaussian_keys_unsorted,
+		uint32_t* gaussian_values_unsorted,
+		dim3 grid);
 }
 
 

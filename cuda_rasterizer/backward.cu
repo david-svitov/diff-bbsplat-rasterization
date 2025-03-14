@@ -14,6 +14,7 @@
 #include "auxiliary.h"
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
+#include "stopthepop_2DGS/resorted_render.cuh"
 namespace cg = cooperative_groups;
 
 // Backward pass for conversion of spherical harmonics to RGB for
@@ -256,11 +257,6 @@ renderCUDA(
 
 	float last_alpha = 0;
 	float last_color[C] = { 0 };
-
-	// Gradient of pixel coordinate w.r.t. normalized 
-	// screen-space viewport corrdinates (-1 to 1)
-	const float ddelx_dx = 0.5 * W;
-	const float ddely_dy = 0.5 * H;
 
 	// Traverse all Gaussians
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -744,6 +740,8 @@ void BACKWARD::render(
 	const float* depths,
 	const float* final_Ts,
 	const uint32_t* n_contrib,
+	const float* out_color,
+	const float* out_others,
 	const float* dL_dpixels,
 	const float* dL_depths,
 	float * dL_dtransMat,
@@ -753,6 +751,34 @@ void BACKWARD::render(
 	float* dL_dtexture_alpha,
 	float* dL_dtexture_color)
 {
+#if PIXEL_RESORTING
+    renderkBufferBackwardCUDA<NUM_CHANNELS> << <grid, block >> >(
+		ranges,
+		point_list,
+		W, H,
+		focal_x, focal_y,
+		bg_color,
+		texture_alpha,
+		texture_color,
+		texture_size,
+		means2D,
+		normal_array,
+		transMats,
+		colors,
+		depths,
+		final_Ts,
+		n_contrib,
+		out_color,
+	    out_others,
+		dL_dpixels,
+		dL_depths,
+		dL_dtransMat,
+		dL_dmean2D,
+		dL_dnormal3D,
+		dL_dcolors,
+		dL_dtexture_alpha,
+		dL_dtexture_color);
+#else
 	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
 		ranges,
 		point_list,
@@ -777,4 +803,5 @@ void BACKWARD::render(
 		dL_dcolors,
 		dL_dtexture_alpha,
 		dL_dtexture_color);
+#endif
 }
