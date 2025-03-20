@@ -441,13 +441,14 @@ renderCUDA(
 			biliniar_texture_sampler(sampled_color, s.x, s.y, texture_color + texture_offset, texture_size, 3);
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += (sampled_color[ch] + features[collected_id[j] * CHANNELS + ch]) * alpha * T;
+
+			atomicAdd(&(impact[ collected_id[j] ]),  alpha * T);
+
 			T = test_T;
 
 			// Keep track of last range entry to update this
 			// pixel.
 			last_contributor = contributor;
-
-			atomicAdd(&(impact[ collected_id[j] ]),  alpha * T);
 		}
 	}
 
